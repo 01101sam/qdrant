@@ -1,0 +1,25 @@
+# Apple Silicon GPU configuration.
+#
+# Usage (native binary on macOS, MoltenVK required):
+#   ./qdrant --config-path config/config-apple.yaml
+#
+# GPU is used for HNSW index building only (up to ~10x faster);
+# search/query is always executed on CPU.
+
+gpu:
+  # Enable GPU indexing at runtime. Requires a binary built with `--features gpu`.
+  indexing: true
+
+  # Apple Silicon GPUs are integrated (unified memory). Redundant on macOS
+  # builds of this fork (default is already true there), but kept explicit so
+  # this config also works with unpatched binaries.
+  allow_integrated: true
+
+  # Convert vectors to f16 inside GPU memory during indexing to halve VRAM
+  # usage. Storage format is unaffected. Apple GPUs have native f16 support.
+  # Disabled by default; enable after validating recall on your data.
+  force_half_precision: false
+
+  # Vulkan parallel processing groups. Leave default (512) unless benchmarks
+  # on your GPU core count say otherwise.
+  #groups_count: 512

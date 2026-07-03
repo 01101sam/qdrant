@@ -230,8 +230,8 @@ pub struct GpuConfig {
     #[serde(default)]
     pub parallel_indexes: Option<usize>,
     /// Allow to use integrated GPUs.
-    /// Default: false
-    #[serde(default)]
+    /// Default: false (true on macOS, where Apple Silicon GPUs are integrated)
+    #[serde(default = "default_allow_integrated")]
     pub allow_integrated: bool,
     /// Allow to use emulated GPUs like LLVMpipe. Useful for CI.
     /// Default: false
@@ -426,6 +426,12 @@ impl LogMsg {
 
 const fn default_telemetry_disabled() -> bool {
     false
+}
+
+/// Apple Silicon GPUs are integrated by definition; there is no discrete GPU
+/// to mis-select on macOS, so enabling integrated GPUs by default is safe there.
+const fn default_allow_integrated() -> bool {
+    cfg!(target_os = "macos")
 }
 
 const fn default_cors() -> bool {

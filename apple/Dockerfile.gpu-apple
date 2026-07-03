@@ -1,0 +1,78 @@
+# Qdrant with GPU indexing on Apple Silicon (linux/arm64).
+#
+# The container reaches the Apple GPU through the Venus path:
+#   qdrant (Vulkan) -> Mesa venus driver -> virtio-gpu -> krunkit/libkrun ->
+#   MoltenVK -> Metal
+#
+# It therefore ONLY works on a podman machine backed by libkrun:
+#   CONTAINERS_MACHINE_PROVIDER=libkrun podman machine init
+#   podman run --device /dev/dri ...
+#
+# Build (from repo root, inside the podman machine, native aarch64):
+#   podman build -f apple/Dockerfile.gpu-apple -t qdrant-gpu-apple .
+#
+# See docs/adr/0001-container-gpu-via-podman-krunkit.md for the background.
+
+FROM docker.io/library/rust:1.96-bookworm AS builder
+
+WORKDIR /qdrant
+
+RUN apt-get update \
+    && apt-get install -y clang lld cmake protobuf-compiler python3 git jq \
+    && rustup component add rustfmt
+
+# Select Cargo profile (e.g., `release` or `perf` for faster builds without LTO)
+ARG PROFILE=release
+
+# jemalloc page size: 2^14 = 16k. Binaries built with 16k pages run on both
+# 4k kernels (podman libkrun VM) and 16k kernels (e.g. Asahi Linux); the
+# reverse is not true.
+ENV JEMALLOC_SYS_WITH_LG_PAGE=14
+
+COPY . .
+
+ARG GIT_COMMIT_ID
+RUN cargo build --profile $PROFILE --features gpu --bin qdrant \
+    && PROFILE_DIR=$(if [ "$PROFILE" = dev ]; then echo debug; else echo $PROFILE; fi) \
+    && mv target/$PROFILE_DIR/qdrant /qdrant/qdrant
+
+# Download and extract web UI
+RUN mkdir /static && STATIC_DIR=/static ./tools/sync-web-ui.sh
+
+
+# Runtime: Fedora 42 with the libkrun-patched Mesa venus driver.
+# Fedora 44's stock Mesa 26.x fails against krunkit (venus ring regression);
+# the slp/mesa-libkrun-vulkan copr provides a validated build for fc42.
+FROM registry.fedoraproject.org/fedora:42 AS qdrant
+
+RUN dnf install -y -q dnf-plugins-core \
+    && dnf copr enable -y slp/mesa-libkrun-vulkan \
+    && dnf install -y mesa-vulkan-drivers vulkan-loader vulkan-tools \
+    && dnf clean all
+
+ARG APP=/qdrant
+
+COPY --from=builder /qdrant/qdrant "$APP"/qdrant
+COPY --from=builder /qdrant/config "$APP"/config
+COPY --from=builder /qdrant/tools/entrypoint.sh "$APP"/entrypoint.sh
+COPY --from=builder /static "$APP"/static
+
+WORKDIR "$APP"
+
+# Point the Vulkan loader at the venus ICD and enable GPU indexing.
+# `allow_integrated` is required: the Venus device reports itself as an
+# integrated GPU (it mirrors the Apple GPU's unified memory).
+ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.aarch64.json \
+    QDRANT__GPU__INDEXING=true \
+    QDRANT__GPU__ALLOW_INTEGRATED=true \
+    TZ=Etc/UTC \
+    RUN_MODE=production
+
+EXPOSE 6333
+EXPOSE 6334
+
+LABEL org.opencontainers.image.title="Qdrant (Apple Silicon GPU)"
+LABEL org.opencontainers.image.description="Qdrant with GPU indexing via Venus/virtio-gpu for Apple Silicon hosts (podman + libkrun/krunkit)"
+LABEL org.opencontainers.image.source="https://github.com/01101sam/qdrant"
+
+CMD ["./entrypoint.sh"]

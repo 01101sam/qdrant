@@ -197,19 +197,26 @@ impl Device {
                 physical_device_features_1_3 =
                     physical_device_features_1_3.subgroup_size_control(true);
 
-                if !vulkan_1_3_properties
+                if vulkan_1_3_properties
                     .required_subgroup_size_stages
                     .contains(vk::ShaderStageFlags::COMPUTE)
                 {
-                    // A strange situation where subgroup size can be different but we cannot set it.
-                    // We cannot handle this case (we have to know subgroup size), so skip device creation.
-                    return Err(GpuError::NotSupported(
-                        "Subgroup size is dynamic but not supported for compute stage".to_string(),
-                    ));
+                    is_dynamic_subgroup_size = true;
+                    // prefer max subgroup size
+                    vulkan_1_3_properties.max_subgroup_size as usize
+                } else {
+                    // Drivers like MoltenVK (Metal) and Venus report a varying subgroup size
+                    // range but cannot pin it per pipeline (Metal has no API to set the
+                    // thread execution width, so `requiredSubgroupSizeStages` lacks COMPUTE).
+                    // Apple GPUs execute compute shaders with a fixed SIMD-group width equal
+                    // to the static `subgroupSize` property (32), so trust it instead of
+                    // rejecting the device.
+                    log::warn!(
+                        "Cannot pin subgroup size for compute stage, trusting static subgroup size {}",
+                        subgroup_properties.subgroup_size,
+                    );
+                    subgroup_properties.subgroup_size as usize
                 }
-                is_dynamic_subgroup_size = true;
-                // prefer max subgroup size
-                vulkan_1_3_properties.max_subgroup_size as usize
             } else {
                 subgroup_properties.subgroup_size as usize
             };

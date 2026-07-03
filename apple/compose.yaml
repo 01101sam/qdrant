@@ -1,0 +1,25 @@
+# Qdrant with Apple GPU indexing, via podman's docker-compatible socket.
+#
+#   export CONTAINERS_MACHINE_PROVIDER=libkrun
+#   export DOCKER_HOST="unix://$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
+#   docker compose -f apple/compose.yaml up -d
+#
+# (or natively: podman compose -f apple/compose.yaml up -d)
+
+services:
+  qdrant:
+    image: ghcr.io/01101sam/qdrant:gpu-apple-latest
+    build:
+      context: ..
+      dockerfile: apple/Dockerfile.gpu-apple
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    devices:
+      # virtio-gpu render node; Venus forwards Vulkan to the host Apple GPU
+      - /dev/dri
+    volumes:
+      - qdrant-storage:/qdrant/storage
+
+volumes:
+  qdrant-storage:

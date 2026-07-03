@@ -1,0 +1,112 @@
+# Apple Silicon GPU support: native binary, container image and GPU regression tests.
+#
+# Kept separate from upstream workflows so rebases stay conflict-free.
+# See docs/adr/0001-container-gpu-via-podman-krunkit.md for the design.
+
+name: Apple GPU build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '*-apple*'   # e.g. v1.18.2-apple.1; avoids firing on synced upstream tags
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  # Native macOS arm64 binary with GPU (MoltenVK) support.
+  build-native-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install dependencies
+        run: |
+          brew install cmake protobuf ninja
+          rustup default stable
+          rustup update
+          cargo -Vv
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build (gpu features)
+        run: cargo build --release --features gpu --locked
+      - name: Package
+        run: |
+          mkdir -p dist/qdrant-aarch64-apple-darwin-gpu
+          cp target/release/qdrant dist/qdrant-aarch64-apple-darwin-gpu/
+          cp config/config-apple.yaml dist/qdrant-aarch64-apple-darwin-gpu/
+          cp apple/run-native.sh dist/qdrant-aarch64-apple-darwin-gpu/
+          tar -czf qdrant-aarch64-apple-darwin-gpu.tar.gz -C dist qdrant-aarch64-apple-darwin-gpu
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qdrant-aarch64-apple-darwin-gpu
+          path: qdrant-aarch64-apple-darwin-gpu.tar.gz
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: qdrant-aarch64-apple-darwin-gpu.tar.gz
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  # linux/arm64 image with the Venus (virtio-gpu) Vulkan driver, for
+  # podman machine + libkrun/krunkit hosts. Built natively on an arm64 runner.
+  build-container-image:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Log in to ghcr
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve tags
+        id: tags
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/qdrant"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "tags=-t ${IMAGE}:${VERSION}-gpu-apple -t ${IMAGE}:gpu-apple-latest" >> "$GITHUB_OUTPUT"
+      - name: Build and push
+        run: |
+          docker buildx create --use
+          docker buildx build \
+            --platform linux/arm64 \
+            -f apple/Dockerfile.gpu-apple \
+            --build-arg GIT_COMMIT_ID=${{ github.sha }} \
+            ${{ steps.tags.outputs.tags }} \
+            --push .
+
+  # GPU code-path regression on emulated GPU (llvmpipe), mirroring upstream
+  # rust-gpu.yml. Catches breakage of the gpu feature and our subgroup patch.
+  gpu-tests-emulated:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install minimal stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install Protoc
+        uses: ./.github/actions/setup-protoc
+      - name: Install nextest
+        uses: taiki-e/install-action@3a0adc33ab45d7b9b9da91822dd2b3c0151704be # nextest
+      - name: Install Vulkan packages
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
+          /usr/bin/vulkaninfo --summary
+      - name: Build
+        run: cargo build --workspace --tests --features "gpu" --locked
+      - name: Run tests
+        run: cargo nextest run --workspace --features "gpu" --profile ci --locked
